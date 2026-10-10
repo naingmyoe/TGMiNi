@@ -1,5 +1,5 @@
 # TGMiNi
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/naingmyoe/TrafficPowerOff/refs/heads/main/customlimit.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/naingmyoe/TGMiNi/refs/heads/main/install.sh)
 ```
