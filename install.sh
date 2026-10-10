@@ -7,9 +7,9 @@ set -Eeuo pipefail
 # ==========================================
 
 APP_DIR="/var/www/vpn-mini"
-PORT="${PORT:-8081}"
+PORT="${PORT:-8082}"
 
-if [[ "$PORT" != "8081" && "$PORT" != "8082" ]]; then
+if [[ "$PORT" != "8082" && "$PORT" != "8082" ]]; then
     echo "ERROR: PORT must be 8081 or 8082"
     exit 1
 fi
