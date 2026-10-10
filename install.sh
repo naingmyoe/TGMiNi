@@ -29,15 +29,7 @@ apt-get install -y nginx
 # ------------------------------------------------------------
 # Check port 8082 before changing nginx
 # ------------------------------------------------------------
-if ss -ltnp 2>/dev/null | grep -qE ":${PORT}[[:space:]]"; then
-    echo
-    echo "ERROR: Port ${PORT} is already in use."
-    echo
-    ss -ltnp 2>/dev/null | grep -E ":${PORT}[[:space:]]" || true
-    echo
-    echo "Free port ${PORT} first, then run install.sh again."
-    exit 1
-fi
+
 
 mkdir -p "$APP_DIR"
 
