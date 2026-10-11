@@ -1,29 +1,27 @@
 #!/bin/bash
 
-# Configuration Variablesssss
 DOMAIN="tgmini.ownvpnnaing.store"
 NGINX_PORT="8084"
 NODE_PORT="3001"
 APP_DIR="/var/www/telegram-vpn"
 
 echo "====================================================="
-echo "  Outline VPN Telegram Mini App - Automated Installer"
+echo "  Outline VPN Telegram Mini App - Real API Installer"
 echo "====================================================="
 
-# Interactive Prompts for Telegram Config
 read -p "Telegram Bot Token ကို ထည့်ပါ: " BOT_TOKEN
 read -p "Admin Telegram Chat ID ကို ထည့်ပါ: " ADMIN_CHAT_ID
+read -p "Outline Server Management API URL (ဥပမာ https://your-server:port/secret): " OUTLINE_API_URL
 
-if [ -z "$BOT_TOKEN" ] || [ -z "$ADMIN_CHAT_ID" ]; then
-    echo "Error: Bot Token နှင့် Admin Chat ID သည် မဖြစ်မနေ ထည့်ရန် လိုအပ်ပါသည်။"
+if [ -z "$BOT_TOKEN" ] || [ -z "$ADMIN_CHAT_ID" ] || [ -z "$OUTLINE_API_URL" ]; then
+    echo "Error: အချက်အလက်များ အားလုံး မဖြစ်မနေ ထည့်ရန် လိုအပ်ပါသည်။"
     exit 1
 fi
 
-echo "=== 1. System Update & Required Packages Installation ==="
+echo "=== 1. System Update & Required Packages ==="
 sudo apt update && sudo apt upgrade -y
 sudo apt install -y curl nginx certbot python3-certbot-nginx git ufw
 
-# Open Ports on Firewall
 sudo ufw allow 8084/tcp
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
@@ -44,7 +42,6 @@ cat << 'EOF' > package.json
 {
   "name": "telegram-vpn-mini-app",
   "version": "1.0.0",
-  "description": "Outline VPN Telegram Mini App with Bot Approval",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -54,6 +51,8 @@ cat << 'EOF' > package.json
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "multer": "^1.4.5-lts.1",
+    "node-fetch": "^2.6.7",
+    "https": "^1.0.0",
     "telegraf": "^4.16.3"
   }
 }
@@ -62,13 +61,15 @@ EOF
 echo "=== 5. Installing Node Modules ==="
 sudo npm install
 
-echo "=== 6. Creating Backend server.js (Port $NODE_PORT) ==="
+echo "=== 6. Creating Backend server.js (Real Outline API Integrated) ==="
 cat << EOF > server.js
 const express = require('express');
 const { Telegraf } = require('telegraf');
 const multer = require('multer');
 const path = require('path');
 const cors = require('cors');
+const fetch = require('node-fetch');
+const https = https = require('https');
 require('dotenv').config();
 
 const app = express();
@@ -81,22 +82,44 @@ const upload = multer({ dest: 'uploads/' });
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
+const OUTLINE_API_URL = process.env.OUTLINE_API_URL;
 const bot = new Telegraf(BOT_TOKEN);
 
+// In-memory database simulation (Production တွင် MongoDB သို့မဟုတ် MySQL သုံးရန်)
+let ordersDB = {}; // orderId -> order object
+let usersDB = {};  // userId -> user key data
+
+// Ignore self-signed SSL certificate for Outline Server API
+const agent = new https.Agent({ rejectUnauthorized: false });
+
+// 1. User submits order
 app.post('/api/order', upload.single('screenshot'), async (req, res) => {
     try {
-        const { plan, price, method, userId, userName } = req.body;
+        const { plan, price, method, userId, userName, gbLimit, durationDays } = req.body;
         const file = req.file;
         const orderId = '#ORD-' + Math.floor(10000 + Math.random() * 90000);
+
+        ordersDB[orderId] = {
+            id: orderId,
+            userId: userId || '12345',
+            userName: userName || 'User',
+            plan,
+            price,
+            method,
+            gbLimit: gbLimit || '100 GB',
+            durationDays: parseInt(durationDays) || 30,
+            status: 'Pending',
+            date: new Date().toISOString().slice(0, 16).replace('T', ' ')
+        };
 
         if (file) {
             await bot.telegram.sendPhoto(ADMIN_CHAT_ID, { source: file.path }, {
                 caption: \`🛒 *Order အသစ်ရောက်ရှိပါပြီ!*\n\n\` +
                          \`📌 Order ID: \\\`\${orderId}\\\`\n\` +
-                         \`👤 User: \${userName || 'Telegram User'} (ID: \\\`\${userId || 'N/A'}\\\`)\n\` +
-                         \`📦 Plan: \${plan}\n\` +
+                         \`👤 User: \${userName} (ID: \\\`\${userId}\\\`)\n\` +
+                         \`📦 Plan: \${plan} (\${gbLimit})\n\` +
                          \`💰 ကျသင့်ငွေ: \${price} Ks (\${method})\n\n\` +
-                         \`ကျေးဇူးပြု၍ စစ်ဆေးပြီး အတည်ပြုပေးပါ။\`,
+                         \`အတည်ပြုရန် အောက်ပါခလုတ်ကို နှိပ်ပါ:\`,
                 parse_mode: 'Markdown',
                 reply_markup: {
                     inline_keyboard: [
@@ -116,17 +139,80 @@ app.post('/api/order', upload.single('screenshot'), async (req, res) => {
     }
 });
 
+// 2. User fetches their orders and active key status
+app.get('/api/user/:userId', (getReq, res) => {
+    const userId = getReq.params.userId;
+    const userOrders = Object.values(ordersDB).filter(o => o.userId === userId);
+    const activeKey = usersDB[userId] || null;
+    res.json({ success: true, orders: userOrders, activeKey });
+});
+
+// 3. Admin Bot Actions (Approve / Reject)
 bot.action(/approve_(.+)/, async (ctx) => {
     const orderId = ctx.match[1];
-    await ctx.editMessageCaption(
-        ctx.update.callback_query.message.caption + \`\n\n*Status: ✅ Approved by Admin*\`,
-        { parse_mode: 'Markdown' }
-    );
-    await ctx.reply(\`Order \${orderId} ကို အောင်မြင်စွာ အတည်ပြုပြီးပါပြီ။\`);
+    const order = ordersDB[orderId];
+
+    if (!order) {
+        return ctx.reply('Order မတွေ့ရှိပါ။');
+    }
+
+    order.status = 'Approved';
+    const userId = order.userId;
+
+    try {
+        let outlineKeyData = usersDB[userId];
+
+        if (!outlineKeyData) {
+            // Call Real Outline API to create a new key
+            const response = await fetch(\`\${OUTLINE_API_URL}/access-keys\`, {
+                method: 'POST',
+                agent: agent
+            });
+            const keyJson = await response.json();
+            
+            outlineKeyData = {
+                keyString: keyJson.accessUrl,
+                keyId: keyJson.id,
+                plan: order.plan,
+                gbLimitBytes: order.gbLimit.includes('Unlimited') ? null : (parseInt(order.gbLimit) * 1024 * 1024 * 1024),
+                expiryDate: new Date(Date.now() + order.durationDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+                usedBytes: 0
+            };
+
+            if (outlineKeyData.gbLimitBytes) {
+                await fetch(\`\${OUTLINE_API_URL}/access-keys/\${keyJson.id}/data-limit\`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ limit: { bytes: outlineKeyData.gbLimitBytes } }),
+                    agent: agent
+                });
+            }
+            usersDB[userId] = outlineKeyData;
+        } else {
+            // Extend existing key expiry date and add days
+            let currentExpiry = new Date(outlineKeyData.expiryDate);
+            if (currentExpiry < new Date()) currentExpiry = new Date();
+            currentExpiry.setDate(currentExpiry.getDate() + order.durationDays);
+            outlineKeyData.expiryDate = currentExpiry.toISOString().slice(0, 10);
+            outlineKeyData.plan = order.plan;
+        }
+
+        await ctx.editMessageCaption(
+            ctx.update.callback_query.message.caption + \`\n\n*Status: ✅ Approved & Key Generated/Renewed* \`,
+            { parse_mode: 'Markdown' }
+        );
+        await ctx.reply(\`Order \${orderId} ကို အောင်မြင်စွာ အတည်ပြုပြီး User ၏ Key သက်တမ်း တိုးမြှင့်ပြီးပါပြီ။\`);
+    } catch (apiErr) {
+        console.error("Outline API Error:", apiErr);
+        await ctx.reply(\`Order အတည်ပြုပြီးသော်လည်း Outline API ချိတ်ဆက်ရာတွင် အမှားရှိပါသည်: \${apiErr.message}\`);
+    }
 });
 
 bot.action(/reject_(.+)/, async (ctx) => {
     const orderId = ctx.match[1];
+    if (ordersDB[orderId]) {
+        ordersDB[orderId].status = 'Rejected';
+    }
     await ctx.editMessageCaption(
         ctx.update.callback_query.message.caption + \`\n\n*Status: ❌ Rejected by Admin*\`,
         { parse_mode: 'Markdown' }
@@ -142,14 +228,15 @@ app.listen(PORT, () => {
 });
 EOF
 
-echo "=== 7. Creating .env configuration file ==="
+echo "=== 7. Creating .env file ==="
 cat << EOF > .env
 PORT=$NODE_PORT
 BOT_TOKEN=$BOT_TOKEN
 ADMIN_CHAT_ID=$ADMIN_CHAT_ID
+OUTLINE_API_URL=$OUTLINE_API_URL
 EOF
 
-echo "=== 8. Creating public/index.html ==="
+echo "=== 8. Creating public/index.html (Clean & Dynamic Status Integration) ==="
 cat << 'EOF' > public/index.html
 <!DOCTYPE html>
 <html lang="my">
@@ -174,13 +261,11 @@ cat << 'EOF' > public/index.html
                     <span class="text-xs text-gray-400">Mini App</span>
                 </div>
             </div>
-            <div class="flex items-center space-x-4 text-gray-600">
-                <i class="fa-solid fa-ellipsis-vertical cursor-pointer"></i>
-                <i class="fa-solid fa-xmark cursor-pointer text-lg"></i>
-            </div>
         </div>
 
         <div id="content-area" class="flex-1 overflow-y-auto p-4">
+            
+            <!-- HOME VIEW -->
             <div id="view-home" class="space-y-4">
                 <div class="bg-gradient-to-r from-blue-600 to-indigo-900 text-white p-5 rounded-2xl shadow-lg relative overflow-hidden">
                     <div class="absolute right-3 top-3 opacity-20 text-7xl"><i class="fa-solid fa-shield-halved"></i></div>
@@ -197,72 +282,77 @@ cat << 'EOF' > public/index.html
                         <span class="text-xs text-blue-600 font-semibold cursor-pointer" onclick="switchTab('orders')">မှာယူမှု မှတ်တမ်း &gt;</span>
                     </div>
 
-                    <div class="bg-white border-2 border-blue-500 rounded-2xl p-4 shadow-sm space-y-3">
-                        <div class="flex justify-between items-start">
-                            <div class="flex items-center space-x-2">
-                                <div class="w-8 h-8 bg-blue-50 rounded-lg flex items-center justify-center text-blue-600">
-                                    <i class="fa-solid fa-key text-sm"></i>
+                    <div class="bg-white border-2 border-gray-200 rounded-2xl p-4 shadow-sm space-y-3">
+                        <div id="no-key-state" class="text-center py-6 space-y-2">
+                            <i class="fa-solid fa-key text-gray-300 text-3xl"></i>
+                            <p class="text-xs text-gray-500">လက်ရှိ Active ဖြစ်နေသော Key မရှိသေးပါ။</p>
+                            <button onclick="switchTab('plans')" class="mt-2 bg-blue-600 text-white text-xs font-semibold px-4 py-2 rounded-xl">Plan ဝယ်ယူရန်</button>
+                        </div>
+
+                        <div id="active-key-state" class="hidden space-y-3">
+                            <div class="flex justify-between items-start">
+                                <div class="flex items-center space-x-2">
+                                    <div class="w-8 h-8 bg-blue-50 rounded-lg flex items-center justify-center text-blue-600">
+                                        <i class="fa-solid fa-key text-sm"></i>
+                                    </div>
+                                    <div>
+                                        <h4 class="text-xs font-bold" id="key-plan-title">Standard Plan</h4>
+                                        <p class="text-[10px] text-gray-500 font-mono truncate w-48" id="current-key-string">ss://...</p>
+                                    </div>
                                 </div>
-                                <div>
-                                    <h4 class="text-xs font-bold" id="key-plan-title">Standard Plan (100 GB)</h4>
-                                    <p class="text-[10px] text-gray-500 font-mono" id="current-key-string">ssconfig://Y2lwZXI6cGFzc3dvcmRA...#OutlineVPN</p>
+                                <span class="bg-emerald-50 text-emerald-600 text-[10px] font-semibold px-2 py-0.5 rounded-full">Active</span>
+                            </div>
+
+                            <div class="flex justify-between items-center bg-gray-50 p-2.5 rounded-xl border border-gray-100 text-xs">
+                                <span class="text-gray-500 flex items-center"><i class="fa-solid fa-location-dot text-blue-500 mr-1.5"></i> လက်ရှိဆာဗာ:</span>
+                                <span id="active-server-name" class="font-bold text-blue-700">Singapore (Default)</span>
+                            </div>
+
+                            <div class="space-y-1">
+                                <div class="flex justify-between text-[10px] text-gray-600 font-medium">
+                                    <span id="usage-text">သုံးစွဲပြီး: 0 GB</span>
+                                    <span class="text-blue-600" id="remaining-text">Limit: Active</span>
+                                </div>
+                                <div class="w-full bg-gray-100 h-2 rounded-full overflow-hidden">
+                                    <div id="usage-progress-bar" class="bg-blue-600 h-full w-[10%]" style="width: 10%;"></div>
+                                </div>
+                                <div class="flex justify-between text-[10px] text-gray-400 pt-0.5">
+                                    <span id="expiry-date-text">သက်တမ်းကုန်ဆုံးရန်: -</span>
+                                    <span class="text-emerald-600 font-medium" id="days-left-text">Active</span>
                                 </div>
                             </div>
-                            <span class="bg-emerald-50 text-emerald-600 text-[10px] font-semibold px-2 py-0.5 rounded-full">Active</span>
-                        </div>
 
-                        <div class="flex justify-between items-center bg-gray-50 p-2.5 rounded-xl border border-gray-100 text-xs">
-                            <span class="text-gray-500 flex items-center"><i class="fa-solid fa-location-dot text-blue-500 mr-1.5"></i> လက်ရှိဆာဗာ:</span>
-                            <span id="active-server-name" class="font-bold text-blue-700">🇸🇬 Singapore (Default)</span>
-                        </div>
-
-                        <div class="space-y-1">
-                            <div class="flex justify-between text-[10px] text-gray-600 font-medium">
-                                <span id="usage-text">သုံးစွဲပြီး: 35.5 GB / 100 GB</span>
-                                <span class="text-blue-600" id="remaining-text">64.5 GB ကျန်ရှိ</span>
+                            <div class="grid grid-cols-2 gap-2 pt-1">
+                                <a id="add-to-outline-btn" href="#" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-xl text-xs transition flex items-center justify-center space-x-1.5 text-center">
+                                    <i class="fa-solid fa-arrow-up-right-from-square"></i>
+                                    <span>Add to Outline</span>
+                                </a>
+                                <button onclick="copyKeyText()" class="bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-2.5 rounded-xl text-xs transition flex items-center justify-center space-x-1.5">
+                                    <i class="fa-solid fa-copy text-blue-600"></i>
+                                    <span>Copy Key</span>
+                                </button>
                             </div>
-                            <div class="w-full bg-gray-100 h-2 rounded-full overflow-hidden">
-                                <div id="usage-progress-bar" class="bg-blue-600 h-full w-[35.5%]"></div>
-                            </div>
-                            <div class="flex justify-between text-[10px] text-gray-400 pt-0.5">
-                                <span id="expiry-date-text">သက်တမ်းကုန်ဆုံးရန်: 2026-11-10</span>
-                                <span class="text-emerald-600 font-medium" id="days-left-text">24 days left</span>
-                            </div>
-                        </div>
 
-                        <div class="grid grid-cols-2 gap-2 pt-1">
-                            <a id="add-to-outline-btn" href="ssconfig://Y2lwZXI6cGFzc3dvcmRA...#OutlineVPN" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-xl text-xs transition flex items-center justify-center space-x-1.5 text-center">
-                                <i class="fa-solid fa-arrow-up-right-from-square"></i>
-                                <span>Add to Outline</span>
-                            </a>
-                            <button onclick="copyKeyText()" class="bg-gray-100 hover:bg-gray-200 text-gray-700 font-semibold py-2.5 rounded-xl text-xs transition flex items-center justify-center space-x-1.5">
-                                <i class="fa-solid fa-copy text-blue-600"></i>
-                                <span>Copy Key</span>
-                            </button>
-                        </div>
-
-                        <div class="grid grid-cols-2 gap-2 pt-2 border-t border-gray-100">
-                            <button onclick="switchTab('server')" class="bg-gray-50 hover:bg-gray-100 text-gray-700 font-semibold py-2 rounded-xl text-xs transition flex items-center justify-center space-x-1.5 border border-gray-200">
-                                <i class="fa-solid fa-server text-blue-600"></i>
-                                <span>ဆာဗာပြောင်းရန်</span>
-                            </button>
-                            <button onclick="switchTab('plans')" class="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2 rounded-xl text-xs transition flex items-center justify-center space-x-1.5">
-                                <i class="fa-solid fa-rotate-right"></i>
-                                <span>သက်တမ်းတိုးရန်</span>
-                            </button>
+                            <div class="grid grid-cols-2 gap-2 pt-2 border-t border-gray-100">
+                                <button onclick="switchTab('server')" class="bg-gray-50 hover:bg-gray-100 text-gray-700 font-semibold py-2 rounded-xl text-xs transition flex items-center justify-center space-x-1.5 border border-gray-200">
+                                    <i class="fa-solid fa-server text-blue-600"></i>
+                                    <span>ဆာဗာပြောင်းရန်</span>
+                                </button>
+                                <button onclick="switchTab('plans')" class="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2 rounded-xl text-xs transition flex items-center justify-center space-x-1.5">
+                                    <i class="fa-solid fa-rotate-right"></i>
+                                    <span>သက်တမ်းတိုးရန်</span>
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
             </div>
 
+            <!-- PLANS VIEW -->
             <div id="view-plans" class="space-y-4 hidden">
                 <div class="flex items-center space-x-2">
                     <button onclick="switchTab('home')" class="text-gray-600 text-xs font-semibold"><i class="fa-solid fa-arrow-left mr-1"></i> နောက်သို့</button>
-                    <h3 class="font-bold text-sm text-gray-800">သက်တမ်းတိုးရန် (Renew Plan)</h3>
-                </div>
-
-                <div class="bg-blue-50 border border-blue-100 p-3 rounded-xl text-xs text-blue-800">
-                    <i class="fa-solid fa-circle-info mr-1"></i> အကောင့်တွင် Key တစ်ခုသာရှိသဖြင့် Plan ဝယ်ယူခြင်းသည် လက်ရှိ Key ကို သက်တမ်းတိုးခြင်း ဖြစ်ပါသည်။
+                    <h3 class="font-bold text-sm text-gray-800">Plan ရွေးချယ်ရန် / သက်တမ်းတိုးရန်</h3>
                 </div>
 
                 <div class="bg-white border border-gray-200 rounded-2xl p-4 shadow-sm space-y-3">
@@ -270,12 +360,12 @@ cat << 'EOF' > public/index.html
                         <div class="flex items-center space-x-2">
                             <div class="w-8 h-8 bg-blue-50 text-blue-600 rounded-lg flex items-center justify-center"><i class="fa-solid fa-shield"></i></div>
                             <div>
-                                <h4 class="text-xs font-bold">Basic Renewal (30 GB)</h4>
+                                <h4 class="text-xs font-bold">Basic Plan (30 GB)</h4>
                                 <p class="text-sm font-extrabold text-gray-900 mt-0.5">Ks 5,000 <span class="text-xs font-normal text-gray-500">/ 7 Days</span></p>
                             </div>
                         </div>
                     </div>
-                    <button onclick="openCheckout('Basic Renewal (30 GB)', '5,000', '30 GB / 7 Days')" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-xl text-xs font-semibold mt-2">ဒီ Plan ဖြင့် သက်တမ်းတိုးမည်</button>
+                    <button onclick="openCheckout('Basic Plan', '5000', '30 GB', 7)" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-xl text-xs font-semibold mt-2">ဝယ်ယူမည် / သက်တမ်းတိုးမည်</button>
                 </div>
 
                 <div class="bg-white border-2 border-blue-600 rounded-2xl p-4 shadow-sm space-y-3">
@@ -283,12 +373,12 @@ cat << 'EOF' > public/index.html
                         <div class="flex items-center space-x-2">
                             <div class="w-8 h-8 bg-blue-50 text-blue-600 rounded-lg flex items-center justify-center"><i class="fa-solid fa-gem"></i></div>
                             <div>
-                                <h4 class="text-xs font-bold">Standard Renewal (100 GB)</h4>
+                                <h4 class="text-xs font-bold">Standard Plan (100 GB)</h4>
                                 <p class="text-sm font-extrabold text-gray-900 mt-0.5">Ks 10,000 <span class="text-xs font-normal text-gray-500">/ 30 Days</span></p>
                             </div>
                         </div>
                     </div>
-                    <button onclick="openCheckout('Standard Renewal (100 GB)', '10,000', '100 GB / 30 Days')" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-xl text-xs font-semibold mt-2">ဒီ Plan ဖြင့် သက်တမ်းတိုးမည်</button>
+                    <button onclick="openCheckout('Standard Plan', '10000', '100 GB', 30)" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-xl text-xs font-semibold mt-2">ဝယ်ယူမည် / သက်တမ်းတိုးမည်</button>
                 </div>
 
                 <div class="bg-white border border-gray-200 rounded-2xl p-4 shadow-sm space-y-3">
@@ -296,23 +386,20 @@ cat << 'EOF' > public/index.html
                         <div class="flex items-center space-x-2">
                             <div class="w-8 h-8 bg-amber-50 text-amber-500 rounded-lg flex items-center justify-center"><i class="fa-solid fa-crown"></i></div>
                             <div>
-                                <h4 class="text-xs font-bold">Premium Renewal (Unlimited)</h4>
+                                <h4 class="text-xs font-bold">Premium Plan (Unlimited)</h4>
                                 <p class="text-sm font-extrabold text-gray-900 mt-0.5">Ks 18,000 <span class="text-xs font-normal text-gray-500">/ 30 Days</span></p>
                             </div>
                         </div>
                     </div>
-                    <button onclick="openCheckout('Premium Renewal (Unlimited)', '18,000', 'Unlimited GB / 30 Days')" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-xl text-xs font-semibold mt-2">ဒီ Plan ဖြင့် သက်တမ်းတိုးမည်</button>
+                    <button onclick="openCheckout('Premium Plan', '18000', 'Unlimited', 30)" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-xl text-xs font-semibold mt-2">ဝယ်ယူမည် / သက်တမ်းတိုးမည်</button>
                 </div>
             </div>
 
+            <!-- SERVER VIEW -->
             <div id="view-server" class="space-y-3 hidden">
                 <div class="flex items-center space-x-2">
                     <button onclick="switchTab('home')" class="text-gray-600 text-xs font-semibold"><i class="fa-solid fa-arrow-left mr-1"></i> နောက်သို့</button>
                     <h3 class="font-bold text-sm text-gray-800">ဆာဗာပြောင်းလဲရန် (Auto-Switch)</h3>
-                </div>
-
-                <div class="bg-amber-50 border border-amber-200 p-3 rounded-xl text-[11px] text-amber-800">
-                    <i class="fa-solid fa-bolt mr-1"></i> ဆာဗာပြောင်းလဲသည့်အခါ သင်၏ <b>ssconfig://</b> ကီးစာသား မပြောင်းလဲဘဲ Auto ချိတ်ဆက်ပေးပါမည်။
                 </div>
 
                 <div class="space-y-2">
@@ -321,29 +408,17 @@ cat << 'EOF' > public/index.html
                             <span class="text-xl">🇸🇬</span>
                             <div>
                                 <h4 class="text-xs font-bold">Singapore (SG 01)</h4>
-                                <p class="text-[10px] text-gray-400">32 ms • High Speed</p>
+                                <p class="text-[10px] text-gray-400">High Speed</p>
                             </div>
                         </div>
                         <span class="text-xs bg-blue-50 text-blue-600 font-semibold px-3 py-1 rounded-lg">ပြောင်းမည်</span>
                     </div>
-
                     <div onclick="changeActiveServer('Japan (JP 01)')" class="bg-white border border-gray-200 p-3.5 rounded-xl flex items-center justify-between shadow-sm cursor-pointer hover:border-blue-500 transition">
                         <div class="flex items-center space-x-3">
                             <span class="text-xl">🇯🇵</span>
                             <div>
                                 <h4 class="text-xs font-bold">Japan (Tokyo)</h4>
-                                <p class="text-[10px] text-gray-400">45 ms • Gaming</p>
-                            </div>
-                        </div>
-                        <span class="text-xs bg-blue-50 text-blue-600 font-semibold px-3 py-1 rounded-lg">ပြောင်းမည်</span>
-                    </div>
-
-                    <div onclick="changeActiveServer('USA (US 01)')" class="bg-white border border-gray-200 p-3.5 rounded-xl flex items-center justify-between shadow-sm cursor-pointer hover:border-blue-500 transition">
-                        <div class="flex items-center space-x-3">
-                            <span class="text-xl">🇺🇸</span>
-                            <div>
-                                <h4 class="text-xs font-bold">USA (New York)</h4>
-                                <p class="text-[10px] text-gray-400">120 ms • Global</p>
+                                <p class="text-[10px] text-gray-400">Low Ping</p>
                             </div>
                         </div>
                         <span class="text-xs bg-blue-50 text-blue-600 font-semibold px-3 py-1 rounded-lg">ပြောင်းမည်</span>
@@ -351,10 +426,11 @@ cat << 'EOF' > public/index.html
                 </div>
             </div>
 
+            <!-- CHECKOUT VIEW -->
             <div id="view-checkout" class="space-y-4 hidden">
                 <div class="flex items-center space-x-2">
                     <button onclick="switchTab('plans')" class="text-gray-600 text-xs font-semibold"><i class="fa-solid fa-arrow-left mr-1"></i> နောက်သို့</button>
-                    <h3 class="font-bold text-sm text-gray-800">ငွေပေးချေမှုအတည်ပြုရန်</h3>
+                    <h3 class="font-bold text-sm text-gray-800">ငွေပေးချေမှု အတည်ပြုရန်</h3>
                 </div>
 
                 <div class="bg-gray-50 border border-gray-200 p-4 rounded-2xl space-y-2">
@@ -377,15 +453,15 @@ cat << 'EOF' > public/index.html
                     <div class="grid grid-cols-3 gap-2">
                         <div onclick="selectPayment('KBZPay')" id="pay-kbz" class="border-2 border-blue-600 bg-blue-50 p-3 rounded-xl text-center cursor-pointer">
                             <p class="text-xs font-bold text-blue-900">KBZPay</p>
-                            <span class="text-[9px] text-gray-500">09-123456789</span>
+                            <span class="text-[9px] text-gray-500">09-XXXXXXXXX</span>
                         </div>
                         <div onclick="selectPayment('WavePay')" id="pay-wave" class="border border-gray-200 p-3 rounded-xl text-center cursor-pointer">
                             <p class="text-xs font-bold text-gray-700">WavePay</p>
-                            <span class="text-[9px] text-gray-500">09-987654321</span>
+                            <span class="text-[9px] text-gray-500">09-XXXXXXXXX</span>
                         </div>
                         <div onclick="selectPayment('AYA Pay')" id="pay-aya" class="border border-gray-200 p-3 rounded-xl text-center cursor-pointer">
                             <p class="text-xs font-bold text-gray-700">AYA Pay</p>
-                            <span class="text-[9px] text-gray-500">09-555666777</span>
+                            <span class="text-[9px] text-gray-500">09-XXXXXXXXX</span>
                         </div>
                     </div>
                 </div>
@@ -410,11 +486,12 @@ cat << 'EOF' > public/index.html
                 </button>
             </div>
 
+            <!-- ORDERS VIEW -->
             <div id="view-orders" class="space-y-4 hidden">
                 <div class="flex items-center justify-between">
                     <div class="flex items-center space-x-2">
                         <button onclick="switchTab('home')" class="text-gray-600 text-xs font-semibold"><i class="fa-solid fa-arrow-left mr-1"></i> နောက်သို့</button>
-                        <h3 class="font-bold text-sm text-gray-800">သက်တမ်းတိုးမှု မှတ်တမ်း</h3>
+                        <h3 class="font-bold text-sm text-gray-800">မှာယူမှု / သက်တမ်းတိုး မှတ်တမ်း</h3>
                     </div>
                 </div>
 
@@ -423,6 +500,7 @@ cat << 'EOF' > public/index.html
                 </div>
             </div>
 
+            <!-- PENDING VIEW -->
             <div id="view-pending" class="space-y-5 text-center py-8 hidden">
                 <div class="w-16 h-16 bg-amber-100 text-amber-600 rounded-full flex items-center justify-center mx-auto text-2xl animate-pulse">
                     <i class="fa-solid fa-clock-rotate-left"></i>
@@ -430,7 +508,7 @@ cat << 'EOF' > public/index.html
                 <div class="space-y-2">
                     <h3 class="font-bold text-base text-gray-800">Admin အတည်ပြုချက်ကို စောင့်ဆိုင်းနေပါသည်</h3>
                     <p class="text-xs text-gray-500 leading-relaxed px-4">
-                        သင်၏ငွေလွှဲစခရင်ရှ็อตကို အောင်မြင်စွာ ပေးပို့ပြီးပါပြီ။ Admin မှ Bot ဖြင့် အတည်ပြုသည်နှင့် သင့် Key သက်တမ်း တိုးမြှင့်သွားပါမည်။
+                        သင်၏ငွေလွှဲစခရင်ရှ็อตကို ပေးပို့ပြီးပါပြီ။ Admin မှ အတည်ပြုသည်နှင့် အလိုအလျောက် Active ဖြစ်လာပါမည်။
                     </p>
                 </div>
                 
@@ -444,6 +522,7 @@ cat << 'EOF' > public/index.html
                 </div>
             </div>
 
+            <!-- PROFILE VIEW -->
             <div id="view-profile" class="space-y-4 hidden">
                 <h3 class="font-bold text-sm">Profile</h3>
                 <div class="bg-white border border-gray-100 p-4 rounded-2xl flex items-center space-x-3 shadow-sm">
@@ -457,11 +536,12 @@ cat << 'EOF' > public/index.html
 
                 <div class="bg-white border border-gray-100 rounded-2xl overflow-hidden shadow-sm divide-y divide-gray-100 text-xs">
                     <div onclick="switchTab('orders')" class="p-3.5 flex justify-between items-center cursor-pointer hover:bg-gray-50">
-                        <span class="flex items-center text-blue-600 font-bold"><i class="fa-solid fa-box-archive mr-3 w-4"></i> သက်တမ်းတိုး မှတ်တမ်း (History)</span>
+                        <span class="flex items-center text-blue-600 font-bold"><i class="fa-solid fa-box-archive mr-3 w-4"></i> မှာယူမှု မှတ်တမ်း (History)</span>
                         <i class="fa-solid fa-chevron-right text-gray-300 text-[10px]"></i>
                     </div>
                 </div>
             </div>
+
         </div>
 
         <div id="bottom-nav" class="absolute bottom-0 left-0 right-0 bg-white border-t border-gray-100 flex justify-around py-2.5 text-gray-400 text-[10px] z-50">
@@ -473,11 +553,11 @@ cat << 'EOF' > public/index.html
     </div>
 
     <script>
-        let currentSelectedPlan = { name: '', price: '', gbLimit: '' };
+        let currentSelectedPlan = { name: '', price: '', gbLimit: '', durationDays: 30 };
         let selectedPaymentMethod = 'KBZPay';
         let isScreenshotUploaded = false;
-        let userKeyString = "ssconfig://Y2lwZXI6cGFzc3dvcmRA...#OutlineVPN";
-        let userOrders = [];
+        let telegramUserId = '12345';
+        let telegramUserName = 'Telegram User';
 
         window.addEventListener('DOMContentLoaded', (event) => {
             if (window.Telegram && window.Telegram.WebApp) {
@@ -485,12 +565,77 @@ cat << 'EOF' > public/index.html
                 tg.expand();
                 const user = tg.initDataUnsafe?.user;
                 if (user) {
-                    document.getElementById('user-profile-name').innerText = user.first_name + (user.last_name ? ' ' + user.last_name : '');
-                    document.getElementById('user-profile-id').innerText = 'ID: ' + user.id;
+                    telegramUserId = user.id.toString();
+                    telegramUserName = user.first_name + (user.last_name ? ' ' + user.last_name : '');
+                    document.getElementById('user-profile-name').innerText = telegramUserName;
+                    document.getElementById('user-profile-id').innerText = 'ID: ' + telegramUserId;
                     document.getElementById('user-avatar-initial').innerText = user.first_name.charAt(0).toUpperCase();
                 }
             }
+            fetchUserData();
+            setInterval(fetchUserData, 10000); // Poll every 10 seconds for real-time status update
         });
+
+        async function fetchUserData() {
+            try {
+                const res = await fetch(\`/api/user/\${telegramUserId}\`);
+                const data = await res.json();
+                if (data.success) {
+                    renderOrders(data.orders);
+                    if (data.activeKey) {
+                        renderActiveKey(data.activeKey);
+                    } else {
+                        document.getElementById('no-key-state').classList.remove('hidden');
+                        document.getElementById('active-key-state').classList.add('hidden');
+                    }
+                }
+            } catch (err) {
+                console.error("Failed to fetch user data", err);
+            }
+        }
+
+        function renderActiveKey(keyData) {
+            document.getElementById('no-key-state').classList.add('hidden');
+            document.getElementById('active-key-state').classList.remove('hidden');
+
+            document.getElementById('key-plan-title').innerText = keyData.plan;
+            document.getElementById('current-key-string').innerText = keyData.keyString;
+            document.getElementById('add-to-outline-btn').href = keyData.keyString;
+            document.getElementById('expiry-date-text').innerText = 'ကုန်ဆုံးရက်: ' + keyData.expiryDate;
+        }
+
+        function renderOrders(orders) {
+            const container = document.getElementById('orders-list-container');
+            if (!orders || orders.length === 0) {
+                container.innerHTML = \`<div class="text-center text-xs text-gray-400 py-8">မှာယူမှု မှတ်တမ်းများ မရှိသေးပါ။</div>\`;
+                return;
+            }
+
+            container.innerHTML = '';
+            orders.forEach(order => {
+                let badge = '<span class="bg-amber-50 text-amber-600 text-[10px] font-bold px-2.5 py-1 rounded-full">Pending Review</span>';
+                if (order.status === 'Approved') {
+                    badge = '<span class="bg-emerald-50 text-emerald-600 text-[10px] font-bold px-2.5 py-1 rounded-full">✅ Approved / Active</span>';
+                } else if (order.status === 'Rejected') {
+                    badge = '<span class="bg-red-50 text-red-600 text-[10px] font-bold px-2.5 py-1 rounded-full">❌ Rejected</span>';
+                }
+
+                container.innerHTML += \`
+                    <div class="bg-white border border-gray-200 rounded-2xl p-4 shadow-sm space-y-3">
+                        <div class="flex justify-between items-center">
+                            <span class="text-xs font-bold text-gray-700">\${order.id}</span>
+                            \${badge}
+                        </div>
+                        <div class="text-xs space-y-1 text-gray-600 pt-1 border-t border-gray-100">
+                            <div class="flex justify-between"><span>Plan:</span><span class="font-semibold text-gray-800">\${order.plan} (\${order.gbLimit})</span></div>
+                            <div class="flex justify-between"><span>ကျသင့်ငွေ:</span><span class="font-semibold text-gray-800">Ks \${order.price}</span></div>
+                            <div class="flex justify-between"><span>ငွေပေးချေမှု:</span><span>\${order.method}</span></div>
+                            <div class="flex justify-between text-[11px] text-gray-400 pt-1"><span>ရက်စွဲ:</span><span>\${order.date}</span></div>
+                        </div>
+                    </div>
+                \`;
+            });
+        }
 
         function switchTab(tabName) {
             ['home', 'plans', 'server', 'checkout', 'pending', 'orders', 'profile'].forEach(t => {
@@ -509,23 +654,20 @@ cat << 'EOF' > public/index.html
 
             const activeNav = document.getElementById('nav-' + tabName);
             if(activeNav) activeNav.className = "flex flex-col items-center text-blue-600";
-
-            if (tabName === 'orders') {
-                renderOrdersList();
-            }
         }
 
         function copyKeyText() {
-            navigator.clipboard.writeText(userKeyString).then(() => {
+            const keyText = document.getElementById('current-key-string').innerText;
+            navigator.clipboard.writeText(keyText).then(() => {
                 alert('Key စာသား ကူးယူပြီးပါပြီ။');
             });
         }
 
-        function openCheckout(planName, price, gbLimit) {
-            currentSelectedPlan = { name: planName, price: price, gbLimit: gbLimit };
+        function openCheckout(planName, price, gbLimit, durationDays) {
+            currentSelectedPlan = { name: planName, price, gbLimit, durationDays };
             document.getElementById('chk-plan-name').innerText = planName;
             document.getElementById('chk-plan-price').innerText = 'Ks ' + price;
-            document.getElementById('chk-plan-gb').innerText = gbLimit;
+            document.getElementById('chk-plan-gb').innerText = gbLimit + ' / ' + durationDays + ' Days';
 
             document.getElementById('upload-placeholder').classList.remove('hidden');
             document.getElementById('upload-success').classList.add('hidden');
@@ -570,20 +712,12 @@ cat << 'EOF' > public/index.html
             const formData = new FormData();
             formData.append('plan', currentSelectedPlan.name);
             formData.append('price', currentSelectedPlan.price);
+            formData.append('gbLimit', currentSelectedPlan.gbLimit);
+            formData.append('durationDays', currentSelectedPlan.durationDays);
             formData.append('method', selectedPaymentMethod);
             formData.append('screenshot', document.getElementById('screenshot-file').files[0]);
-
-            let userId = 'N/A';
-            let userName = 'Telegram User';
-            if (window.Telegram && window.Telegram.WebApp) {
-                const user = window.Telegram.WebApp.initDataUnsafe?.user;
-                if (user) {
-                    userId = user.id;
-                    userName = user.first_name + (user.last_name ? ' ' + user.last_name : '');
-                }
-            }
-            formData.append('userId', userId);
-            formData.append('userName', userName);
+            formData.append('userId', telegramUserId);
+            formData.append('userName', telegramUserName);
 
             try {
                 const response = await fetch('/api/order', {
@@ -593,19 +727,11 @@ cat << 'EOF' > public/index.html
                 const result = await response.json();
 
                 if (result.success) {
-                    userOrders.unshift({
-                        id: result.orderId,
-                        plan: currentSelectedPlan.name,
-                        price: currentSelectedPlan.price,
-                        method: selectedPaymentMethod,
-                        status: 'Pending',
-                        date: new Date().toISOString().slice(0, 16).replace('T', ' ')
-                    });
-
                     ['home', 'plans', 'server', 'checkout', 'orders', 'profile'].forEach(t => {
                         document.getElementById('view-' + t).classList.add('hidden');
                     });
                     document.getElementById('view-pending').classList.remove('hidden');
+                    fetchUserData();
                 } else {
                     alert('Order တင်ရာတွင် အမှားအယွင်းရှိပါသည်: ' + (result.error || 'Unknown error'));
                 }
@@ -620,44 +746,23 @@ cat << 'EOF' > public/index.html
             alert('ဆာဗာကို ' + serverName + ' သို့ အောင်မြင်စွာ ပြောင်းလဲပြီးပါပြီ။');
             switchTab('home');
         }
-
-        function renderOrdersList() {
-            const container = document.getElementById('orders-list-container');
-            container.innerHTML = '';
-
-            if (userOrders.length === 0) {
-                container.innerHTML = `<div class="text-center text-xs text-gray-400 py-8">မှာယူမှု မှတ်တမ်းများ မရှိသေးပါ။</div>`;
-                return;
-            }
-
-            userOrders.forEach(order => {
-                const cardHTML = `
-                    <div class="bg-white border border-gray-200 rounded-2xl p-4 shadow-sm space-y-3">
-                        <div class="flex justify-between items-center">
-                            <span class="text-xs font-bold text-gray-700">${order.id}</span>
-                            <span class="bg-amber-50 text-amber-600 text-[10px] font-bold px-2.5 py-1 rounded-full">Pending Review</span>
-                        </div>
-                        <div class="text-xs space-y-1 text-gray-600 pt-1 border-t border-gray-100">
-                            <div class="flex justify-between"><span>Plan:</span><span class="font-semibold text-gray-800">${order.plan}</span></div>
-                            <div class="flex justify-between"><span>ကျသင့်ငွေ:</span><span class="font-semibold text-gray-800">Ks ${order.price}</span></div>
-                            <div class="flex justify-between"><span>ငွေပေးချေမှု:</span><span>${order.method}</span></div>
-                            <div class="flex justify-between text-[11px] text-gray-400 pt-1"><span>ရက်စွဲ:</span><span>${order.date}</span></div>
-                        </div>
-                    </div>
-                `;
-                container.innerHTML += cardHTML;
-            });
-        }
     </script>
 </body>
 </html>
 EOF
 
-echo "=== 9. Obtaining SSL Certificate via Certbot ==="
+echo "=== 9. Creating .env file ==="
+cat << EOF > .env
+PORT=$NODE_PORT
+BOT_TOKEN=$BOT_TOKEN
+ADMIN_CHAT_ID=$ADMIN_CHAT_ID
+OUTLINE_API_URL=$OUTLINE_API_URL
+EOF
+
+echo "=== 10. Configuring SSL & Nginx ==="
 sudo systemctl stop nginx
 sudo certbot certonly --standalone -d $DOMAIN --non-interactive --agree-tos --email admin@$DOMAIN
 
-echo "=== 10. Configuring Nginx for Port $NGINX_PORT with SSL ==="
 sudo bash -c "cat << 'EOF' > /etc/nginx/sites-available/telegram-vpn
 server {
     listen $NGINX_PORT ssl;
@@ -685,12 +790,13 @@ sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t
 sudo systemctl restart nginx
 
-echo "=== 11. Starting Application with PM2 ==="
+echo "=== 11. Starting PM2 ==="
+sudo pm2 delete telegram-vpn 2>/dev/null
 sudo pm2 start server.js --name "telegram-vpn"
 sudo pm2 startup
 sudo pm2 save
 
 echo "====================================================="
-echo "  Installation Completed Successfully!"
-echo "  Your Mini App URL: https://$DOMAIN:$NGINX_PORT"
+echo "  Installation & Real API Setup Completed!"
+echo "  URL: https://$DOMAIN:$NGINX_PORT"
 echo "====================================================="
